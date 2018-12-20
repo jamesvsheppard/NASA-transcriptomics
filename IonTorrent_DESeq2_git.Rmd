@@ -1,0 +1,145 @@
+```{r preliminaries}
+#update.packages()
+source("http://bioconductor.org/biocLite.R")
+biocLite("BiocUpgrade")
+biocLite(ask=FALSE)
+library("sva")
+library("DESeq2")
+library("pheatmap")
+library("RColorBrewer")
+library("ggplot2")
+
+```
+
+```{r Load data}
+
+#load in sample metadata
+sampleTable<-read.table("SampleTable.txt", sep = "\t", header=F)
+colnames(sampleTable)<-c("SampleName","FileName","Gravity", "Position", "Genotype", "Run")
+
+##########################################
+# Select samples (if applicable)
+##########################################
+
+#Remove GC samples from sampleTable
+sampleTable=sampleTable[(sampleTable$Gravity != "GC"),]
+sampleTable
+
+##########################################
+# setup design and factors
+##########################################
+sampleTable$Run<-factor(sampleTable$Run)
+sampleTable$Genotype<-factor(sampleTable$Genotype)
+sampleTable$Gravity<-factor(sampleTable$Gravity)
+sampleTable$Position<-factor(sampleTable$Position)
+Gravity = factor(sampleTable$Gravity)
+
+#setup gravity/genotype vector
+CVG<-factor(paste(sampleTable$Gravity,".",sampleTable$Genotype,sep="")) 
+
+#designate design
+designRGG<-formula(~Run + Genotype + Gravity)
+
+```
+
+```{r construct DESeq object}
+
+#assemble with data from HTSeq-count
+data<-DESeqDataSetFromHTSeqCount(sampleTable, directory="~/IonTorrent/", design=designRGG)
+
+```
+
+```{r preFiltering}
+
+#filter out observations with 0 counts in all samples
+dds_filtered=data[(rowSums(counts(data)) > 1)]
+
+#estimate size factors/dispersions and setup DESeq obj
+dds<-estimateSizeFactors(dds_filtered)
+dds<-estimateDispersions(dds)
+dds<-DESeq(dds)
+
+```
+
+
+```{r data processing/extraction}
+
+resultsNames(dds)
+results<-results(dds)
+summary(results)
+sum(results$padj<0.05, na.rm=T) 
+results=results[which(results$padj <0.05),]
+write.csv(results, file= "ddsRGG_1164.csv")
+
+```
+
+```{r remove batch effect}
+#get data from dds counts; remove those with rowmeans < 1
+dat<-counts(dds, normalized=TRUE)
+idx <- rowMeans(dat) > 1
+dat <- dat[idx,]
+
+#setup surrogate variables
+colData(dds)[,-1]
+mod <- model.matrix(~ Dataset, colData(dds)[,-1])
+mod0 <- model.matrix(~ 1, colData(dds)[,-1])
+svseq <- svaseq(dat, mod, mod0, n.sv=2)
+ddssva <- dds
+ddssva$SV1 <- svseq$sv[,1]
+ddssva$SV2 <- svseq$sv[,2]
+design(ddssva) <- ~ SV1 + SV2 + Gravity 
+
+#DE analysis step
+dds_batch<-DESeq(ddssva)
+
+vsd_batch <- varianceStabilizingTransformation(dds, blind=TRUE)
+
+```
+
+```{r pca plotting}
+
+png(filename="test.png")
+plotPCA(vsd, intgroup=c("Gravity")) + ggtitle("All samples") + geom_label(aes(label = name))
+dev.off()
+
+```
+
+```{r scatter plotting}
+
+setwd("~/IonTorrent/plots/")
+
+vsd <- varianceStabilizingTransformation(dds, blind=TRUE)
+
+plotCounts(ddsGenoGrav, "AT5G11260",intgroup = "Genotype", pch=16,xlab="")
+
+```
+
+
+```{r plotting single boxplot}
+#initialize blank .png
+png(filename="genename_boxplot.png")
+
+#get counts
+counts=counts(dds, normalized=TRUE)
+
+#initialize plot table sorted by increasing gravity
+plot.table=counts[,order(Gravity)]
+
+#designate gene of interest and generate single boxplot
+gene="genename"
+plot(plot.table[gene,])
+boxplot(plot.table[gene,1:16],plot.table[gene,17:20],plot.table[gene,21:24],plot.table[gene,25:28],plot.table[gene,29:32], names=c("MG","0.53g","0.65g","0.76g","0.88g"), main=gene)
+
+#print plot.png to file
+dev.off()
+
+```
+
+```{r iterating through list of genes to boxplot}
+for(gene in list){
+  png(filename=paste(gene,"_FracG_no76",".png", sep=""))
+  plot.table = counts[gene,]
+  boxplot(plot.table[1:16],plot.table[17:20],plot.table[21:24],plot.table[25:28], names=c("MG", "0.53g", "0.65g", "0.88g"), main=paste(gene, "_no76", sep=""))
+  dev.off()}
+```
+
